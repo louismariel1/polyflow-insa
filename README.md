@@ -1,4 +1,4 @@
-This project is a modified version of original project polyflow-quickstart project at https://github.com/riccardotommasini/polyflow-quickstart
+This project is a modified version of the original project polyflow-quickstart at https://github.com/riccardotommasini/polyflow-quickstart
 It uses an animal example to simulate continuous querying processing within a Datastream framework. The following examples are available in this repository:
 The following abbrevations are used herein: S2R = StreamToRelation, R2R = RelationToRelation, R2S = RelationToStream. The examples are as follows:
 
