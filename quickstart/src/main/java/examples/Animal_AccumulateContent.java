@@ -19,12 +19,14 @@ import org.streamreasoning.polyflow.base.operatorsimpl.dag.DAGImpl;
 import org.streamreasoning.polyflow.base.operatorsimpl.s2r.HoppingWindowOpImpl;
 import org.streamreasoning.polyflow.base.processing.ContinuousProgramImpl;
 import org.streamreasoning.polyflow.base.processing.TaskImpl;
+
 import relational.operatorsimpl.r2r.CustomRelationalQuery;
-import relational.operatorsimpl.r2r.R2RjtablesawSelection;
+import relational.operatorsimpl.r2r.R2RjtablesawJoin;
 import relational.operatorsimpl.r2s.RelationToStreamjtablesawImpl;
 import relational.sds.SDSjtablesaw;
 import relational.stream.RowStream;
 import relational.stream.RowStreamGenerator;
+
 import tech.tablesaw.api.*;
 
 import java.util.*;
@@ -33,7 +35,9 @@ public class Animal_AccumulateContent {
 
     public static void main(String[] args) throws InterruptedException {
 
-        // --- Create a row stream generator ---
+        // ---------------------------------------
+        // 1. STREAM GENERATOR WITH TWO STREAMS
+        // ---------------------------------------
         RowStreamGenerator generator = new RowStreamGenerator() {
             private volatile boolean running = false;
 
@@ -43,29 +47,35 @@ public class Animal_AccumulateContent {
                 Random rand = new Random();
                 long start = System.currentTimeMillis();
 
-                String[] species = { "lion", "zebra", "gazelle", "elephant", "dog", "cat" };
-                long animalId = 1;
+                String[] species = {"lion", "zebra", "gazelle", "elephant", "dog", "cat"};
+                String[] moods   = {"happy", "neutral", "angry"};
+
+                long id = 1;
 
                 while (running) {
-                    String sp = species[(int) (animalId - 1)];
-                    int speed = (int) Math.round(5.0 + rand.nextDouble() * 20.0); // cast to int to fix Tablesaw R2R
-                    long timestamp = System.currentTimeMillis() - start;
 
-                    Tuple tuple = new Quartet<>(animalId, sp, speed, timestamp);
-                    System.out.printf("Sending %s (ID=%d) in partition %d%n", sp, animalId, animalId % 3);
-                    getStream("http://wildlife/animals").put(tuple, timestamp);
+                    // --- animal tuple ---
+                    String sp = species[(int) ((id - 1) % species.length)];
+                    int speed = 5 + rand.nextInt(20);
+                    long ts = System.currentTimeMillis() - start;
 
-                    animalId = (animalId % species.length) + 1;
+                    Tuple animal = new Quartet<>(id, sp, speed, ts);
+                    getStream("animals").put(animal, ts);
+
+                    // --- mood tuple ---
+                    String m = moods[rand.nextInt(moods.length)];
+                    int moodSpeed = 5 + rand.nextInt(20);
+                    Tuple mood = new Quartet<>(id, m, moodSpeed, ts);
+                    getStream("moods").put(mood, ts);
+
+                    id++;
 
                     try {
                         Thread.sleep(200);
                     } catch (InterruptedException e) {
-                        Thread.currentThread().interrupt();
                         break;
                     }
                 }
-
-                System.out.println("🐾 Stream generator stopped.");
             }
 
             @Override
@@ -74,84 +84,103 @@ public class Animal_AccumulateContent {
             }
         };
 
-        // --- Setup input/output streams ---
-        DataStream<Tuple> inputStream = generator.getStream("http://wildlife/animals");
-        DataStream<Tuple> outStream = new RowStream("out");
+        // ---------------------------------------
+        // 2. STREAM DEFINITIONS
+        // ---------------------------------------
+        DataStream<Tuple> animals = generator.getStream("animals");
+        DataStream<Tuple> moods   = generator.getStream("moods");
+        DataStream<Tuple> out     = new RowStream("out");
 
-        // --- Engine configuration ---
+        // ---------------------------------------
+        // 3. ENGINE CONFIG
+        // ---------------------------------------
         Report report = new ReportImpl();
         report.add(new OnWindowClose());
-        Tick tick = Tick.TIME_DRIVEN;
-        Time timeInstance = new TimeImpl(0);
-        Table emptyContent = Table.create();
+        Time time = new TimeImpl(0);
 
-        // --- Accumulator content factory ---
-        AccumulatorContentFactory<Tuple, Tuple, Table> accumulatorContentFactory = new AccumulatorContentFactory<>(
-                t -> t,
-                t -> {
-                    Table r = Table.create();
-                    for (int i = 0; i < t.getSize(); i++) {
-                        Object value = t.getValue(i);
-                        String columnName = "c" + (i + 1);
+        AccumulatorContentFactory<Tuple, Tuple, Table> acc =
+                new AccumulatorContentFactory<>(
+                        t -> t,
+                        t -> {
+                            Table r = Table.create();
+                            for (int i = 0; i < t.getSize(); i++) {
+                                Object v = t.getValue(i);
+                                String col = "c" + (i + 1);
 
-                        if (value instanceof Long) {
-                            LongColumn lc = r.containsColumn(columnName) ? (LongColumn) r.column(columnName) : LongColumn.create(columnName);
-                            lc.append((Long) value);
-                            if (!r.containsColumn(columnName)) r.addColumns(lc);
-                        } else if (value instanceof Integer) {
-                            IntColumn ic = r.containsColumn(columnName) ? (IntColumn) r.column(columnName) : IntColumn.create(columnName);
-                            ic.append((Integer) value);
-                            if (!r.containsColumn(columnName)) r.addColumns(ic);
-                        } else if (value instanceof String) {
-                            StringColumn sc = r.containsColumn(columnName) ? (StringColumn) r.column(columnName) : StringColumn.create(columnName);
-                            sc.append((String) value);
-                            if (!r.containsColumn(columnName)) r.addColumns(sc);
-                        } else if (value instanceof Boolean) {
-                            BooleanColumn bc = r.containsColumn(columnName) ? (BooleanColumn) r.column(columnName) : BooleanColumn.create(columnName);
-                            bc.append((Boolean) value);
-                            if (!r.containsColumn(columnName)) r.addColumns(bc);
-                        }
-                    }
-                    return r;
-                },
-                (r1, r2) -> r1.isEmpty() ? r2 : r1.append(r2),
-                emptyContent
-        );
+                                if (v instanceof Long) {
+                                    LongColumn c = r.containsColumn(col) ? (LongColumn) r.column(col) : LongColumn.create(col);
+                                    c.append((Long) v);
+                                    if (!r.containsColumn(col)) r.addColumns(c);
+                                } else if (v instanceof Integer) {
+                                    IntColumn c = r.containsColumn(col) ? (IntColumn) r.column(col) : IntColumn.create(col);
+                                    c.append((Integer) v);
+                                    if (!r.containsColumn(col)) r.addColumns(c);
+                                } else if (v instanceof String) {
+                                    StringColumn c = r.containsColumn(col) ? (StringColumn) r.column(col) : StringColumn.create(col);
+                                    c.append((String) v);
+                                    if (!r.containsColumn(col)) r.addColumns(c);
+                                }
+                            }
+                            return r;
+                        },
+                        (a, b) -> a.isEmpty() ? b : a.append(b),
+                        Table.create()
+                );
 
-        // --- Continuous program ---
-        ContinuousProgram<Tuple, Tuple, Table, Tuple> cp = new ContinuousProgramImpl<>();
+        // ---------------------------------------
+        // 4. TWO WINDOWS (REQUIRED FOR JOIN)
+        // ---------------------------------------
+        StreamToRelationOperator<Tuple, Tuple, Table> winAnimals =
+                new HoppingWindowOpImpl<>(Tick.TIME_DRIVEN, time, "wAnimals", acc, report, 1000, 1000);
 
-        StreamToRelationOperator<Tuple, Tuple, Table> s2rOp =
-                new HoppingWindowOpImpl<>(tick, timeInstance, "w1", accumulatorContentFactory, report, 1000, 1000);
+        StreamToRelationOperator<Tuple, Tuple, Table> winMoods =
+                new HoppingWindowOpImpl<>(Tick.TIME_DRIVEN, time, "wMoods", acc, report, 1000, 1000);
 
-        CustomRelationalQuery selectionQuery = new CustomRelationalQuery(4, "c3"); // c3 is speed column
-        RelationToRelationOperator<Table> r2rOp = new R2RjtablesawSelection(selectionQuery, Collections.singletonList(s2rOp.getName()), "partial_1");
+        // ---------------------------------------
+        // 5. JOIN
+        // ---------------------------------------
+        CustomRelationalQuery q = new CustomRelationalQuery(4, "c1"); // join by ID
 
-        RelationToStreamOperator<Table, Tuple> r2sOp = new RelationToStreamjtablesawImpl();
+        RelationToRelationOperator<Table> join =
+                new R2RjtablesawJoin(q, Arrays.asList("wAnimals", "wMoods"), "joined");
 
-        // --- Task ---
-        Task<Tuple, Tuple, Table, Tuple> task = new TaskImpl<>("1");
-        task = task.addS2ROperator(s2rOp, inputStream)
-                .addR2ROperator(r2rOp)
-                .addR2SOperator(r2sOp)
+        // ---------------------------------------
+        // 6. R2S
+        // ---------------------------------------
+        RelationToStreamOperator<Table, Tuple> r2s = new RelationToStreamjtablesawImpl();
+
+        // ---------------------------------------
+        // 7. TASK
+        // ---------------------------------------
+        Task<Tuple, Tuple, Table, Tuple> task = new TaskImpl<>("task");
+
+        task = task.addS2ROperator(winAnimals, animals)
+                .addS2ROperator(winMoods, moods)
+                .addR2ROperator(join)
+                .addR2SOperator(r2s)
                 .addSDS(new SDSjtablesaw())
                 .addDAG(new DAGImpl<>())
-                .addTime(timeInstance);
+                .addTime(time);
 
         task.initialize();
 
-        cp.buildTask(task, Collections.singletonList(inputStream), Collections.singletonList(outStream));
+        ContinuousProgram<Tuple, Tuple, Table, Tuple> cp =
+                new ContinuousProgramImpl<>();
 
-        outStream.addConsumer((stream, element, ts) -> System.out.println(element + " @ " + ts));
+        cp.buildTask(task, Arrays.asList(animals, moods), Collections.singletonList(out));
 
-        // --- Start streaming for 10 seconds ---
-        Thread generatorThread = new Thread(generator::startStreaming);
-        generatorThread.start();
+        out.addConsumer((s, t, ts) -> System.out.println("JOINED → " + t + " @ " + ts));
 
-        Thread.sleep(10000); // stream for 10 seconds
+        // ---------------------------------------
+        // 8. START GENERATOR
+        // ---------------------------------------
+        Thread th = new Thread(generator::startStreaming);
+        th.start();
+
+        Thread.sleep(10_000);
         generator.stopStreaming();
-        generatorThread.join();
+        th.join();
 
-        System.out.println("✅ Streaming stopped after 10 seconds.");
+        System.out.println(" Finished.");
     }
 }
